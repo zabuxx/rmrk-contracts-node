@@ -270,6 +270,7 @@ impl Contains<Call> for BaseFilter {
 pub struct RmrkExtension;
 use rmrk_traits::{AccountIdOrCollectionNftTuple, BasicResource};
 type NftId = u32;
+type ResourceId = u32;
 
 impl ChainExtension<Runtime> for RmrkExtension {
 	fn call<E: Ext>(func_id: u32, env: Environment<E, InitState>) -> Result<RetVal, DispatchError>
@@ -410,7 +411,7 @@ impl ChainExtension<Runtime> for RmrkExtension {
 					resource,
 				);
 
-				error!(
+				trace!(
                     target: "runtime",
                     "[ChainExtension]|call|func_id:{:}|add_result: {:?}",
                     func_id, add_result);
@@ -420,6 +421,34 @@ impl ChainExtension<Runtime> for RmrkExtension {
 
 				env.write(&resource_id, false, None)
 					.map_err(|_| DispatchError::Other("ChainExtension failed to add resource"))?;
+			},
+			// Remove resource
+			5 => {
+				let mut env = env.buf_in_buf_out();
+				let (contract_address, collection_id, nft_id, resource_id): (
+					AccountId,
+					CollectionId,
+					NftId,
+					ResourceId,
+				) = env.read_as()?;
+
+				let origin: Origin =
+					frame_system::RawOrigin::Signed(contract_address.clone()).into();
+
+				let result = crate::pallet_rmrk_core::Pallet::<Runtime>::remove_resource(
+					origin,
+					collection_id,
+					nft_id,
+					resource_id,
+				);
+
+				trace!(
+                    target: "runtime",
+                    "[ChainExtension]|call|func_id:{:}|result: {:?}",
+                    func_id, result);
+
+				env.write(&result.encode(), false, None)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to remove resource"))?;
 			},
 
 			_ => {
