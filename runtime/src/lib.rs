@@ -14,7 +14,7 @@ use sp_runtime::{
 	transaction_validity::{TransactionSource, TransactionValidity},
 	ApplyExtrinsicResult, DispatchError, MultiSignature,
 };
-use sp_std::prelude::*;
+use sp_std::{prelude::*, vec::Vec};
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
@@ -268,7 +268,7 @@ impl Contains<Call> for BaseFilter {
 
 // Chain-Extension for RMRK Pallet
 pub struct RmrkExtension;
-use rmrk_traits::nft::AccountIdOrCollectionNftTuple;
+use rmrk_traits::{AccountIdOrCollectionNftTuple, BasicResource};
 type NftId = u32;
 
 impl ChainExtension<Runtime> for RmrkExtension {
@@ -294,7 +294,7 @@ impl ChainExtension<Runtime> for RmrkExtension {
 						},
 					};
 
-				error!(
+				trace!(
                     target: "runtime",
                     "[ChainExtension]|call|func_id:{:}| caller: {:?}| collection_id: {:?}| nft_id: {:?}| is_owner: {:?}",
                     func_id, caller, collection_id, nft_id, is_owner);
@@ -305,17 +305,21 @@ impl ChainExtension<Runtime> for RmrkExtension {
 					DispatchError::Other("ChainExtension failed to call nft storage map")
 				})?;
 			},
-			// mint nft
-			// returns nft_id
-			// hacky, race condition prone
+
+			/* 
+			** mints nft
+			** returns nft_id
+			** hacky, can have race conditions
+			*/
 			2 => {
 				let mut env = env.buf_in_buf_out();
 				let (contract_address, owner, collection_id, metadata): (
 					AccountId,
 					AccountId,
 					CollectionId,
-					BoundedVec<u8, StringLimit>,
-				) = env.read_as()?;
+					Vec<u8>,
+				) = env.read_as_unbounded(env.in_len())?;
+
 				let origin: Origin =
 					frame_system::RawOrigin::Signed(contract_address.clone()).into();
 				let nft_id = crate::pallet_rmrk_core::Pallet::<Runtime>::next_nft_id(collection_id);
@@ -325,57 +329,97 @@ impl ChainExtension<Runtime> for RmrkExtension {
 					collection_id,
 					None,
 					None,
-					metadata,
+					metadata.try_into().unwrap(),
 					false,
 					None,
-				)
-				.is_ok();
+				);
 
-				error!(
+				trace!(
                     target: "runtime",
                     "[ChainExtension]|call|func_id:{:}| contract_address: {:?}| collection_id: {:?}| owner: {:?} | mint_result: {:?}",
                     func_id, contract_address, collection_id, owner, mint_result);
 
+				let nft_id = if mint_result.is_ok() { Some(nft_id) } else { None };
 				let nft_id = nft_id.encode();
 
 				env.write(&nft_id, false, None)
 					.map_err(|_| DispatchError::Other("ChainExtension failed to mint nft"))?;
 			},
-			// create collection
-			// returns collection id
-			// hacky, race condition prone
+			/*
+			** create collection
+			** returns collection id
+			** hacky, can have race conditions
+			*/
 			3 => {
 				let mut env = env.buf_in_buf_out();
-				let (contract_address, metadata, symbol): (
-					AccountId,
-					BoundedVec<u8, StringLimit>,
-					BoundedVec<u8, CollectionSymbolLimit>,
-				) = env.read_as()?;
+				let (contract_address, metadata, symbol): (AccountId, Vec<u8>, Vec<u8>) =
+					env.read_as_unbounded(env.in_len())?;
+
 				let origin: Origin =
 					frame_system::RawOrigin::Signed(contract_address.clone()).into();
 
 				let collection_id = crate::pallet_rmrk_core::Pallet::<Runtime>::collection_index();
 				let create_result = crate::pallet_rmrk_core::Pallet::<Runtime>::create_collection(
 					origin,
-					metadata.clone(),
+					metadata.try_into().unwrap(),
 					None,
-					symbol.clone(),
-				)
-				.is_ok();
+					symbol.try_into().unwrap(),
+				);
 
-				let collection =
-					crate::pallet_rmrk_core::Pallet::<Runtime>::collections(collection_id);
-
-				error!(
+				trace!(
                     target: "runtime",
-                    "[ChainExtension]|call|func_id:{:}| contract_address: {:?}| metadata: {:?}| symbol: {:?} | create_result: {:?} | collection: {:?}",
-                    func_id, contract_address, metadata, symbol, create_result, collection);
+                    "[ChainExtension]|call|func_id:{:} | create_result: {:?} ",
+                    func_id, create_result);
+
+				let collection_id = if create_result.is_ok() { Some(collection_id) } else { None };
 
 				let collection_id = collection_id.encode();
 
 				env.write(&collection_id, false, None).map_err(|_| {
 					DispatchError::Other("ChainExtension failed to create collection")
 				})?;
+			},
+			// Add Basic Resource, return resource id
+			4 => {
+				let mut env = env.buf_in_buf_out();
+				let (contract_address, collection_id, nft_id, metadata): (
+					AccountId,
+					CollectionId,
+					NftId,
+					Vec<u8>,
+				) = env.read_as_unbounded(env.in_len())?;
+
+				let origin: Origin =
+					frame_system::RawOrigin::Signed(contract_address.clone()).into();
+
+				let resource_id = crate::pallet_rmrk_core::Pallet::<Runtime>::next_resource_id(
+					collection_id,
+					nft_id,
+				);
+				let resource = BasicResource {
+					src: None,
+					metadata: Some(metadata.try_into().unwrap()),
+					license: None,
+					thumb: None,
+				};
+
+				let add_result = crate::pallet_rmrk_core::Pallet::<Runtime>::add_basic_resource(
+					origin,
+					collection_id,
+					nft_id,
+					resource,
+				);
+
+				error!(
+                    target: "runtime",
+                    "[ChainExtension]|call|func_id:{:}|add_result: {:?}",
+                    func_id, add_result);
+
+				let resource_id = if add_result.is_ok() { Some(resource_id) } else { None };
+				let resource_id = resource_id.encode();
+
+				env.write(&resource_id, false, None)
+					.map_err(|_| DispatchError::Other("ChainExtension failed to add resource"))?;
 			},
 
 			_ => {
